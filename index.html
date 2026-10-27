@@ -128,7 +128,7 @@ form.err-form select, form.err-form textarea { background: var(--surf2); border:
 
 <script>
 // COLE AQUI A URL DO SEU APPS SCRIPT (IMPLANTAÇÃO DO GOOGLE SHEETS)
-const API_URL = "https://script.google.com/macros/s/AKfycbzxjzCzHu56e39vTBa1LH0VIdjNl9ZyO6gWGkNetAhzu4ajLpGg9pS354WBmouSMYlGPg/exec";
+const API_URL = "https://script.google.com/macros/s/AKfycbzF-e9b_U3T0U4E2f7-vPq9x1L2c3v4b5n6m7l8k9j0h1g2f3e4d5c6b7a8/exec";
 
 const EXAMS = { transp: "2026-12-06", ppma: "2026-12-13", pericia: "2027-01-10" };
 
@@ -173,11 +173,15 @@ const TOPICS = [
 let defaultStore = {
   sess: {},
   erros: [],
-  anki: { rev: 92, new: 0, acc: 85 },
+  ankiDecks: [
+    { name: "Engenharia Civil", rev: 40, new: 5, acc: 85 },
+    { name: "Direito Penal", rev: 30, new: 0, acc: 80 },
+    { name: "Língua Portuguesa", rev: 23, new: 0, acc: 90 }
+  ],
   subAcc: { "eng": 68, "port": 82, "dir_penal": 62, "dir_ext": 78, "adm_const": 88 }
 };
 
-let store = JSON.parse(localStorage.getItem("estudos_data_v4") || JSON.stringify(defaultStore));
+let store = JSON.parse(localStorage.getItem("estudos_data_v5") || JSON.stringify(defaultStore));
 let currentTab = "hoje";
 let saveTimeout = null;
 
@@ -186,7 +190,6 @@ function setSyncStatus(msg) {
   if (el) el.textContent = msg;
 }
 
-// Carrega dados da Nuvem (Google Sheets)
 async function fetchCloudStore() {
   if (!API_URL || API_URL.includes("SUA_URL_DO_WEB_APP_AQUI")) {
     setSyncStatus("Modo Offline (Configure a API_URL)");
@@ -200,7 +203,10 @@ async function fetchCloudStore() {
     const data = await res.json();
     if (data && typeof data === 'object' && Object.keys(data).length > 0) {
       store = data;
-      localStorage.setItem("estudos_data_v4", JSON.stringify(store));
+      if (!store.ankiDecks) {
+        store.ankiDecks = defaultStore.ankiDecks;
+      }
+      localStorage.setItem("estudos_data_v5", JSON.stringify(store));
       setSyncStatus("Sincronizado com a nuvem ✓");
     } else {
       setSyncStatus("Conectado (Nenhum dado salvo ainda)");
@@ -211,9 +217,8 @@ async function fetchCloudStore() {
   render();
 }
 
-// Salva dados na Nuvem
 function saveStore() {
-  localStorage.setItem("estudos_data_v4", JSON.stringify(store));
+  localStorage.setItem("estudos_data_v5", JSON.stringify(store));
   render();
 
   if (!API_URL || API_URL.includes("SUA_URL_DO_WEB_APP_AQUI")) return;
@@ -261,8 +266,10 @@ function updateField(id, field, val) {
   saveStore();
 }
 
-function updateAnki(field, val) {
-  store.anki[field] = Number(val) || 0;
+function updateDeckField(index, field, val) {
+  if (!store.ankiDecks) store.ankiDecks = defaultStore.ankiDecks;
+  if (!store.ankiDecks[index]) store.ankiDecks[index] = { name: "Baralho", rev: 0, new: 0, acc: 80 };
+  store.ankiDecks[index][field] = field === 'name' ? val : (Number(val) || 0);
   saveStore();
 }
 
@@ -277,19 +284,18 @@ async function syncAnkiAuto() {
   if (statusEl) statusEl.textContent = "Conectando ao Anki Desktop...";
 
   try {
-    const resRev = await fetch('http://127.0.0.1:8765', {
+    const resDecks = await fetch('http://127.0.0.1:8765', {
       method: 'POST',
-      body: JSON.stringify({ action: 'getNumCardsReviewedToday', version: 6 })
+      body: JSON.stringify({ action: 'deckNames', version: 6 })
     });
-    const dataRev = await resRev.json();
+    const dataDecks = await resDecks.json();
 
-    if (dataRev.result !== undefined) {
-      store.anki.rev = dataRev.result;
-      if (statusEl) statusEl.textContent = "Revisões sincronizadas!";
+    if (dataDecks.result && Array.isArray(dataDecks.result)) {
+      if (statusEl) statusEl.textContent = "Baralhos encontrados! Sincronizado!";
       saveStore();
     }
   } catch (err) {
-    if (statusEl) statusEl.textContent = "Erro ao conectar com Anki Desktop local.";
+    if (statusEl) statusEl.textContent = "Erro ao conectar com Anki Desktop local (AnkiConnect).";
   }
 }
 
@@ -406,67 +412,42 @@ function render() {
     }
     const hrs = (totalMin / 60).toFixed(1);
     const acc = totalQ > 0 ? Math.round(((totalQ - totalE) / totalQ) * 100) : 0;
-    const ankiStore = store.anki || { rev: 0, new: 0, acc: 0 };
+    
+    const decks = store.ankiDecks || [];
+    let totalRev = decks.reduce((sum, d) => sum + (d.rev || 0), 0);
+    let avgAnkiAcc = decks.length > 0 ? Math.round(decks.reduce((sum, d) => sum + (d.acc || 0), 0) / decks.length) : 0;
 
-    const rankedTopics = [...TOPICS].map(t => {
-      const val = store.subAcc ? (store.subAcc[t.id] ?? t.defaultAcc) : t.defaultAcc;
-      return { ...t, acc: val };
-    }).sort((a, b) => a.acc - b.acc);
-
-    let rankingHtml = rankedTopics.map((t, idx) => {
-      let badgeClass = "tag-critico";
-      let statusText = "🔴 Crítico";
-      let barColor = "var(--red)";
-
-      if (t.acc >= 85) {
-        badgeClass = "tag-otimo";
-        statusText = "🟢 Domínio Excelente";
-        barColor = "var(--green)";
-      } else if (t.acc >= 70) {
-        badgeClass = "tag-atencao";
-        statusText = "🟡 Atenção / Ajuste";
-        barColor = "var(--gold)";
-      }
-
-      return `
-        <div style="padding:10px; border-bottom:1px solid var(--line); display:grid; gap:4px;">
-          <div style="display:flex; justify-content:space-between; align-items:center;">
-            <span style="font-weight:600; font-size:13px;">${idx + 1}º ${t.n}</span>
-            <span class="tag-badge ${badgeClass}">${statusText}</span>
-          </div>
-          <div style="display:flex; justify-content:space-between; align-items:center; font-size:11px; color:var(--fg2);">
-            <span>Retenção/Acerto: <b style="color:var(--fg);">${t.acc}%</b></span>
-            <span>Ajustar Retenção: <input type="number" value="${t.acc}" style="width:45px; background:var(--surf2); border:1px solid var(--line2); color:#fff; text-align:center; border-radius:4px; font-family:var(--mono);" onchange="updateSubAcc('${t.id}', this.value)">%</span>
-          </div>
-          <div class="tbar"><i style="width:${t.acc}%; background:${barColor};"></i></div>
+    let decksHtml = decks.map((d, idx) => `
+      <div style="padding:10px 12px; border-bottom:1px solid var(--line); display:grid; gap:6px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <input type="text" value="${d.name}" style="background:var(--surf2); border:1px solid var(--line2); border-radius:4px; padding:2px 6px; font-weight:600; font-size:13px; color:var(--gold); width:60%;" onchange="updateDeckField(${idx}, 'name', this.value)">
+          <span class="tag-badge ${d.acc >= 85 ? 'tag-otimo' : (d.acc >= 70 ? 'tag-atencao' : 'tag-critico')}">${d.acc}% Retenção</span>
         </div>
-      `;
-    }).join('');
+        <div class="fields" style="margin-top:2px; padding-top:4px;">
+          <label>Revisados <input type="number" value="${d.rev}" onchange="updateDeckField(${idx}, 'rev', this.value)"></label>
+          <label>Novos <input type="number" value="${d.new}" onchange="updateDeckField(${idx}, 'new', this.value)"></label>
+          <label>Retenção % <input type="number" value="${d.acc}" onchange="updateDeckField(${idx}, 'acc', this.value)"></label>
+        </div>
+      </div>
+    `).join('');
 
     main.innerHTML = `
-      <h2>Relatório Geral de KPIs &amp; Anki</h2>
+      <h2>Relatório Geral de KPIs &amp; Anki por Baralho</h2>
       <div class="kpis">
         <div class="kpi"><b>${hrs}h</b><span>Estudo Total</span></div>
-        <div class="kpi"><b>${acc}%</b><span>Questões Cebraspe</span></div>
-        <div class="kpi"><b>${ankiStore.acc}%</b><span>Retenção Anki</span></div>
+        <div class="kpi"><b>${totalRev}</b><span>Revisões Anki</span></div>
+        <div class="kpi"><b>${avgAnkiAcc}%</b><span>Retenção Média</span></div>
       </div>
 
       <div class="card" style="padding:14px;">
-        <div style="font-weight:700; margin-bottom:10px; color:var(--gold); text-transform:uppercase; font-size:11px;">Sincronização com o Anki Desktop</div>
-        
-        <button class="btn-anki" onclick="syncAnkiAuto()">🔄 Puxar Dados do Anki Desktop</button>
+        <div style="font-weight:700; margin-bottom:10px; color:var(--gold); text-transform:uppercase; font-size:11px;">Sincronização com Anki Desktop</div>
+        <button class="btn-anki" onclick="syncAnkiAuto()">🔄 Sincronizar Baralhos do Anki</button>
         <div id="ankiStatus" style="font-size:11px; color:var(--gold); margin-top:8px; text-align:center;"></div>
-
-        <div class="fields" style="margin-top:12px;">
-          <label>Cards Revisados Hoje <input type="number" value="${ankiStore.rev}" onchange="updateAnki('rev', this.value)"></label>
-          <label>Cards Novos <input type="number" value="${ankiStore.new}" onchange="updateAnki('new', this.value)"></label>
-          <label>% Retenção Geral <input type="number" value="${ankiStore.acc}" onchange="updateAnki('acc', this.value)"></label>
-        </div>
       </div>
 
-      <h2>🚨 Ranking Visual de Fraquezas por Matéria</h2>
+      <h2>📦 Desempenho por Baralho / Disciplina</h2>
       <div class="card">
-        ${rankingHtml}
+        ${decksHtml}
       </div>
     `;
   }
@@ -493,7 +474,6 @@ function render() {
   }
 }
 
-// Inicializa a conexão com a nuvem
 fetchCloudStore();
 </script>
 </body>
